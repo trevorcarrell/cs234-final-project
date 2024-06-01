@@ -1,6 +1,21 @@
 import torch
 import torch.nn as nn
+import pandas as pd
+from tqdm import tqdm
 
+
+def load_data(data_file):
+    # Load the data in chunks and put it in a pandas dataframe:
+    chunks = []
+
+    for chunk in tqdm(pd.read_csv(data_file, header=None, sep=r'\s+', names=['user', 'item', 'rating', 'timestamp'], chunksize=1000)):
+        chunks.append(chunk)
+    
+    # Concatenate the chunks into a single dataframe
+    data = pd.concat(chunks, axis=0)
+    data.drop('timestamp', axis=1, inplace=True)
+
+    return data
 
 class LSTMModel(nn.Module):
     def __init__(self, input_dim, hidden_dim, output_dim, num_layers):
@@ -30,5 +45,12 @@ class LSTMModel(nn.Module):
 
         return out
     
+
+def main():
+    load_data('ml-100k/u.data')
+
+
+if __name__ == '__main__':
+    main()
 
     
