@@ -6,23 +6,39 @@ from sklearn.model_selection import train_test_split
 from collections import defaultdict
 import argparse
 from torch.utils.data import Dataset, DataLoader
+import numpy as np
+from torch.nn.utils.rnn import pad_sequence
 
+PAD_VALUE = -100
 
-def get_user_interests(df: pd.DataFrame, n_users: int) -> dict[int, list[int]]:
+def collate_fn(batch):
+    """
+    Custom collate function for the DataLoader that pads the sequences in each batch.
+    """
+    users = [item[0] for item in batch]
+    episodes = [item[1] for item in batch]
+    lens = [item[2] for item in batch]
+
+    # Pad the sequences in each batch
+    episodes = pad_sequence(episodes, batch_first=True, padding_value=PAD_VALUE)
+
+    return torch.tensor(users), episodes, torch.tensor(lens)
+    
+def get_user_interests(df: pd.DataFrame, users: np.ndarray) -> dict[int, list[int]]:
     """
     Returns a dictionary of items tat each user has interacted with sorted by timestamp.
     """
     user_interests = defaultdict(list)
 
     # For each user, where users are numbered from 1 to n_users + 1
-    users = []
     items = []
-    for uid in range(1, n_users + 1):
-        users.append(uid)
-        items.append(list(df[df['user'] == uid]['item']))
+    user_ids = []
+    for user_id in users:
+        user_ids.append(user_id)
+        items.append(list(df[df['user'] == user_id]['item']))
 
     # Create a df with users and items
-    user_interests = pd.concat([pd.Series(users), pd.Series(items)], axis=1)
+    user_interests = pd.concat([pd.Series(user_ids), pd.Series(items)], axis=1)
     user_interests.columns = ['user', 'items']
 
     return user_interests
@@ -36,10 +52,8 @@ def get_train_test_data(data_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFra
     train_users, test_users = train_test_split(unique_users, test_size=0.1)
     train_data = data_df[data_df.user.isin(train_users)]
     test_data = data_df[data_df.user.isin(test_users)]
-    n_train_users = train_data.user.nunique()
-    n_test_users = test_data.user.nunique()
 
-    return train_data, test_data, n_train_users, n_test_users
+    return train_data, test_data, np.unique(train_users), np.unique(test_users)
 
 
 def load_data(data_file):
@@ -59,26 +73,29 @@ def load_data(data_file):
 
 
 class SLDataset(Dataset):
-    def __init__(self, data, memory_length):
+    def __init__(self, data, num_timesteps):
         self.data = data
-        self.memory_length = memory_length
+        self.num_timesteps = num_timesteps
 
     def __len__(self):
         return len(self.data)
     
     def __getitem__(self, idx):
         # Get a user and the items they like
-        user = self.data.iloc[idx].user
-        items = self.data.iloc[idx].item
+        user, items = self.data.iloc[idx].values
         
-        # Split the items into episodes of length memory_length
+        # Split the items into episodes of length num_timesteps
         episodes = []
-        for i in range(0, len(items), self.memory_length):
-            episodes.append(items[i : i + self.memory_length])
+        for i in range(0, len(items), self.num_timesteps):
+            episodes.append(items[i : i + self.num_timesteps])
         
-        return user, episodes
+        # Exclude the last episode if it is not of length num_timesteps
+        if len(episodes[-1]) != self.num_timesteps:
+            episodes.pop()
+
+        return torch.tensor(user), torch.tensor(episodes), torch.tensor(len(episodes))
         
-        
+
 class LSTMModel(nn.Module):
     def __init__(self, input_dim, hidden_dim, output_dim, num_timesteps, num_recommendations):
         super(LSTMModel, self).__init__()
@@ -98,26 +115,24 @@ class LSTMModel(nn.Module):
 
         # Define the output layer
         self.output_layer = nn.Sequential(
-            nn.Linear(self.output_dim, self.output_dim),
-            nn.Softmax()
+            nn.Linear(self.hidden_dim, self.output_dim),
+            nn.Softmax(dim=0)
         )
 
     def forward(self, x):
-        # Make sure x is a tensor
-        x = torch.tensor(x)
-
         # Construct the initial hidden state and cell state
-        hidden_state = torch.zeros(1, self.hidden_dim)
-        cell_state = torch.zeros(1, self.hidden_dim)
+        hidden_state = torch.zeros(self.hidden_dim)
+        cell_state = torch.zeros(self.hidden_dim)
 
         # Initialize the output tensors
-        a_hats = torch.empty((self.num_timesteps))  # Model predictions at each timestep
-        feedbacks = torch.empty((self.num_timesteps))  # Feedback at each timestep
+        a_hats = torch.empty((self.num_timesteps), dtype=torch.long)  # Model predictions at each timestep
+        feedbacks = torch.empty((self.num_timesteps), dtype=torch.long)  # Feedback at each timestep
         masked_probs = torch.empty((self.num_timesteps, self.output_dim))  # Masked probabilities at each timestep
-        a_hat = 0
+        a_hat = torch.tensor(0) 
         feedback = 0
-        for i in range(self.num_timesteps):  
-            embedding_input = self.embed[a_hat] * feedback if i > 0 else 0
+        for i in range(self.num_timesteps): 
+            a_hat = torch.tensor(a_hat).long()
+            embedding_input = self.embed(a_hat) * feedback if i > 0 else torch.zeros_like(self.embed(a_hat))
             hidden_state, cell_state = self.lstm_cell(embedding_input, (hidden_state, cell_state))
 
             # Put the hidden state through the output layer
@@ -125,14 +140,14 @@ class LSTMModel(nn.Module):
             masked_output = output * self.mask
 
             # Get the top num_recommendations items:
-            top_items = torch.topk(masked_output, self.num_recommendations)
+            top_items = torch.topk(masked_output, self.num_recommendations).values
 
             # Get our prediction (a_hat), which is the top item in the intersection of the top items and the sub episode (x)
             intersection = top_items[torch.isin(top_items, x)]
             intersection_cardinality = len(intersection)
             feedback = 1 if intersection_cardinality > 0 else -1
             a_hat = intersection[0] if intersection_cardinality > 0 else top_items[0]
-            
+
             # Update a_hats, feedbacks, and masked_probs
             a_hats[i] = a_hat
             feedbacks[i] = feedback
@@ -147,58 +162,138 @@ def parse_args() -> argparse.ArgumentParser:
     parser.add_argument('--input_dim', type=int, default=100, help='Input dimension of the model')
     parser.add_argument('--hidden_dim', type=int, default=100, help='Hidden dimension of the model')
     parser.add_argument('--num_timesteps', type=int, default=20, help='Number of layers in the model')
+    parser.add_argument('--num_recs', type=int, default=10, help='Number of recommendations to make')
     parser.add_argument('--num_epochs', type=int, default=100, help='Number of epochs to train the model')
     parser.add_argument('--batch_size', type=int, default=20, help='Batch size for training the model')
     parser.add_argument('--data_file', type=str, default='ml-100k/u.data', help='Path to the data file')
     parser.add_argument('--model_file', type=str, default='sl_lstm_model.pth', help='Path to save the model')
-    parser.add_argument('--memory_length', type=int, default=20, help='How far back a time step should look in the past')
 
     return parser.parse_args()
+
+
+def calculate_hit_at_n(feedbacks, num_recommendations, num_users):
+    # Calculate the hit@N, where N is the number of recommendations
+    all_feedbacks = torch.stack(feedbacks, dim=0)
+    hit_at_n = torch.sum((1 / num_recommendations) * torch.sum(all_feedbacks, dim=(1, 2))) / num_users
+
+    return hit_at_n
+
+
+def test_model(model, test_loader, criterion):
+    # Evalaute the trained model on the test set
+    model.eval()
+    test_loss = 0.0
+    all_feedbacks = []
+    for i, data in enumerate(test_loader, 0):
+        user_feedbacks = []
+        user, episodes, episode_len = data
+        for episode in episodes:
+            # Truncate the episode to the correct length
+            episode = episode[:episode_len]
+
+            # Make a forward pass and calculate the loss
+            a_hats, feedbacks, masked_probs = model(episode)
+            user_feedbacks.append(feedbacks)
+            loss = criterion(masked_probs, episode[0])
+            test_loss += loss.item()
+        
+        user_feedbacks = torch.stack(user_feedbacks, dim=0)
+        all_feedbacks.append(user_feedbacks)
+
+    # Calculate the hit@N, where N is the number of recommendations
+    hit_at_n = calculate_hit_at_n(all_feedbacks, model.num_recommendations, len(test_loader))
+    print(f'Test Loss: {test_loss}')
+    print(f'Hit@{model.num_recommendations}: {hit_at_n}')
+
+    return hit_at_n, test_loss
+
+
+def train_model(model, criterion, optimizer, train_loader, num_epochs, model_file):
+    # Train the model for num_epochs
+    model.train()
+    all_feedbacks = []
+    for epoch in range(num_epochs):
+        epoch_loss = 0.0
+        for i, data in enumerate(train_loader, 0):
+            user_feedbacks = []
+            user, episodes, episode_len = data
+            for e, episode in enumerate(episodes):
+                # Truncate the episode to the correct length
+                episode = episode[:episode_len[e]]
+
+                # Zero the gradients and make a forward pass
+                optimizer.zero_grad()
+                a_hats, feedbacks, masked_probs = model(episode)
+                user_feedbacks.append(feedbacks)
+
+                # Calculate the loss and update the model parameters
+                loss = criterion(masked_probs, episode[0])
+                loss.backward()
+                optimizer.step()
+
+                # Update the epoch loss
+                epoch_loss += loss.item()
+
+            all_feedbacks.append(user_feedbacks)
+        
+        print(f'Epoch {epoch + 1}, Loss: {epoch_loss }')
+    
+    # Calculate the hit@N, where N is the number of recommendations
+    hit_at_n = calculate_hit_at_n(all_feedbacks, model.num_recommendations, len(train_loader))
+    print(f'Hit@{model.num_recommendations}: {hit_at_n}')
+
+    # Save the model
+    torch.save(model.state_dict(), model_file)
+
+    return hit_at_n
 
 
 def main():
     # Parse the command line arguments
     args = parse_args()
 
-    # Get the data file and model file
-    data_file = args.data_file
     model_file = args.model_file
 
     # Load the user data
-    data_df = load_data(data_file)
+    data_df = load_data(args.data_file)
 
     # Get the number of unique items
     n_items = data_df.item.nunique()
 
     # Separate the data into training and testing sets
-    train_data, test_data, n_train_users, n_test_users = get_train_test_data(data_df)
+    train_data, test_data, train_users, test_users = get_train_test_data(data_df)
 
     # Get the items that each user has interacted with, key: user_id, value: list of item ids
-    user_interests = get_user_interests(data_df, n_train_users)
+    user_interests_train = get_user_interests(train_data, train_users)
+    user_interests_test = get_user_interests(test_data, test_users)
     
     # Create Dataset and DataLoader objects for training and testing
-    train_dataset = SLDataset(user_interests, args.memory_length)
+    train_dataset = SLDataset(user_interests_train, args.num_timesteps)
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, collate_fn=collate_fn, drop_last=True)
+    test_dataset = SLDataset(user_interests_test, args.num_timesteps)
+    test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, collate_fn=collate_fn, drop_last=True)
 
     # Set up hyperparameters
     lr = args.lr
     input_dim = args.input_dim
     hidden_dim = args.hidden_dim
-    rnn_size = args.rnn_size
-    num_layers = args.num_timesteps
-    num_epochs = args.num_epochs
-    batch_size = args.batch_size
+    num_recommendations = args.num_recs
+    num_timesteps = args.num_timesteps
     output_dim = n_items
-    memory_length = args.memory_length
+    num_epochs = args.num_epochs
 
-    # Initialize the model
-    model = LSTMModel(input_dim, hidden_dim, output_dim, num_layers)
-
-    # Define the loss function and optimizer
+    # Initialize the model, loss function, and optimizer
+    model = LSTMModel(input_dim, hidden_dim, output_dim, num_timesteps, num_recommendations)
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
-           
+    # Train the model
+    train_model(model, criterion, optimizer, train_loader, num_epochs, model_file)
 
+    # Test the model
+    test_model(model, test_loader, criterion)
+
+           
 if __name__ == '__main__':
     main()
 
