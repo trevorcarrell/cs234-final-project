@@ -140,13 +140,18 @@ class LSTMModel(nn.Module):
             masked_output = output * self.mask
 
             # Get the top num_recommendations items:
-            top_items = torch.topk(masked_output, self.num_recommendations).values
+            top_items = torch.topk(masked_output, self.num_recommendations).indices
 
             # Get our prediction (a_hat), which is the top item in the intersection of the top items and the sub episode (x)
-            intersection = top_items[torch.isin(top_items, x)]
+            intersection = top_items[torch.isin(top_items + 1, x)]
             intersection_cardinality = len(intersection)
             feedback = 1 if intersection_cardinality > 0 else -1
             a_hat = intersection[0] if intersection_cardinality > 0 else top_items[0]
+
+            # Update the mask
+            mask_clone = self.mask.clone()
+            mask_clone[a_hat] = 0
+            self.mask = mask_clone
 
             # Update a_hats, feedbacks, and masked_probs
             a_hats[i] = a_hat
@@ -158,26 +163,26 @@ class LSTMModel(nn.Module):
 
 def parse_args() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description='Supervised Learning Benchmark')
-    parser.add_argument('--lr', type=float, default=0.005, help='Learning rate for the model')
+    parser.add_argument('--lr', type=float, default=0.001, help='Learning rate for the model')
     parser.add_argument('--input_dim', type=int, default=100, help='Input dimension of the model')
     parser.add_argument('--hidden_dim', type=int, default=100, help='Hidden dimension of the model')
     parser.add_argument('--num_timesteps', type=int, default=20, help='Number of layers in the model')
     parser.add_argument('--num_recs', type=int, default=10, help='Number of recommendations to make')
     parser.add_argument('--num_epochs', type=int, default=100, help='Number of epochs to train the model')
-    parser.add_argument('--batch_size', type=int, default=20, help='Batch size for training the model')
+    parser.add_argument('--batch_size', type=int, default=16, help='Batch size for training the model')
     parser.add_argument('--data_file', type=str, default='ml-100k/u.data', help='Path to the data file')
     parser.add_argument('--model_file', type=str, default='sl_lstm_model.pth', help='Path to save the model')
 
     return parser.parse_args()
 
 
-def calculate_hit_at_n(feedbacks, num_recommendations, num_users):
+def calculate_hit_at_n(feedbacks, num_users):
     # Calculate the hit@N, where N is the number of recommendations
     hit_at_n = 0.0
     for user_feedback in feedbacks:
         # Convert all -1 feedbacks to 0
         user_feedback[user_feedback == -1] = 0
-        hit_at_n += (1 / num_recommendations) * torch.sum(user_feedback, dim=0)
+        hit_at_n += (1 / len(user_feedback)) * torch.sum(user_feedback, dim=0)
     
     return hit_at_n / num_users
 
@@ -203,7 +208,7 @@ def test_model(model, test_loader, criterion):
         all_feedbacks.append(user_feedbacks)
 
     # Calculate the hit@N, where N is the number of recommendations
-    hit_at_n = calculate_hit_at_n(all_feedbacks, model.num_recommendations, len(test_loader))
+    hit_at_n = calculate_hit_at_n(all_feedbacks, len(test_loader))
     print(f'Test Loss: {test_loss}')
     print(f'Hit@{model.num_recommendations}: {hit_at_n}')
 
@@ -223,18 +228,20 @@ def train_model(model, criterion, optimizer, train_loader, num_epochs, model_fil
                 # Truncate the episode to the correct length
                 episode = episode[:episode_len[e]]
 
-                # Zero the gradients and make a forward pass
-                optimizer.zero_grad()
-                a_hats, feedbacks, masked_probs = model(episode)
-                user_feedbacks.append(feedbacks)
+                for s, sub_episode in enumerate(episode):
 
-                # Calculate the loss and update the model parameters
-                loss = criterion(masked_probs, episode[0])
-                loss.backward()
-                optimizer.step()
+                    # Zero the gradients and make a forward pass
+                    optimizer.zero_grad()
+                    a_hats, feedbacks, masked_probs = model(sub_episode)
+                    user_feedbacks.append(feedbacks)
 
-                # Update the epoch loss
-                epoch_loss += loss.item()
+                    # Calculate the loss and update the model parameters
+                    loss = criterion(masked_probs, sub_episode)
+                    loss.backward()
+                    optimizer.step()
+
+                    # Update the epoch loss
+                    epoch_loss += loss.item()
 
             user_feedbacks = torch.cat(user_feedbacks, dim=0)
             all_feedbacks.append(user_feedbacks)
@@ -242,7 +249,7 @@ def train_model(model, criterion, optimizer, train_loader, num_epochs, model_fil
         print(f'Epoch {epoch + 1}, Loss: {epoch_loss }')
     
     # Calculate the hit@N, where N is the number of recommendations
-    hit_at_n = calculate_hit_at_n(all_feedbacks, model.num_recommendations, len(train_loader))
+    hit_at_n = calculate_hit_at_n(all_feedbacks, len(train_loader))
     print(f'Hit@{model.num_recommendations}: {hit_at_n}')
 
     # Save the model
