@@ -173,10 +173,11 @@ def parse_args() -> argparse.ArgumentParser:
 
 def calculate_hit_at_n(feedbacks, num_recommendations, num_users):
     # Calculate the hit@N, where N is the number of recommendations
-    all_feedbacks = torch.stack(feedbacks, dim=0)
-    hit_at_n = torch.sum((1 / num_recommendations) * torch.sum(all_feedbacks, dim=(1, 2))) / num_users
-
-    return hit_at_n
+    hit_at_n = 0.0
+    for user_feedback in feedbacks:
+        hit_at_n += (1 / num_recommendations) * torch.sum(user_feedback, dim=0)
+    
+    return hit_at_n / num_users
 
 
 def test_model(model, test_loader, criterion):
@@ -197,7 +198,7 @@ def test_model(model, test_loader, criterion):
             loss = criterion(masked_probs, episode[0])
             test_loss += loss.item()
         
-        user_feedbacks = torch.stack(user_feedbacks, dim=0)
+        user_feedbacks = torch.cat(user_feedbacks, dim=0)
         all_feedbacks.append(user_feedbacks)
 
     # Calculate the hit@N, where N is the number of recommendations
@@ -234,6 +235,7 @@ def train_model(model, criterion, optimizer, train_loader, num_epochs, model_fil
                 # Update the epoch loss
                 epoch_loss += loss.item()
 
+            user_feedbacks = torch.cat(user_feedbacks, dim=0)
             all_feedbacks.append(user_feedbacks)
         
         print(f'Epoch {epoch + 1}, Loss: {epoch_loss }')
