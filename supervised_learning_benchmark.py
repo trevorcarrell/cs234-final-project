@@ -175,6 +175,8 @@ def calculate_hit_at_n(feedbacks, num_recommendations, num_users):
     # Calculate the hit@N, where N is the number of recommendations
     hit_at_n = 0.0
     for user_feedback in feedbacks:
+        # Convert all -1 feedbacks to 0
+        user_feedback[user_feedback == -1] = 0
         hit_at_n += (1 / num_recommendations) * torch.sum(user_feedback, dim=0)
     
     return hit_at_n / num_users
@@ -188,9 +190,8 @@ def test_model(model, test_loader, criterion):
     for i, data in enumerate(test_loader, 0):
         user_feedbacks = []
         user, episodes, episode_len = data
-        for episode in episodes:
-            # Truncate the episode to the correct length
-            episode = episode[:episode_len]
+        for e, episode in enumerate(episodes):            # Truncate the episode to the correct length
+            episode = episode[:episode_len[e]]
 
             # Make a forward pass and calculate the loss
             a_hats, feedbacks, masked_probs = model(episode)
