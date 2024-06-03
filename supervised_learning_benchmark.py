@@ -67,12 +67,16 @@ class SLDataset(Dataset):
         return len(self.data)
     
     def __getitem__(self, idx):
+        # Get a user and the items they like
         user = self.data.iloc[idx].user
-        item = self.data.iloc[idx].item
+        items = self.data.iloc[idx].item
         
-        # Create
-
-        return user, item
+        # Split the items into episodes of length memory_length
+        episodes = []
+        for i in range(0, len(items), self.memory_length):
+            episodes.append(items[i : i + self.memory_length])
+        
+        return user, episodes
         
         
 
@@ -86,32 +90,35 @@ class LSTMModel(nn.Module):
         self.num_layers = num_layers
 
         # Define the LSTM layer
-        self.lstm = nn.LSTM(self.input_dim, self.hidden_dim, self.num_layers, batch_first=True)
+        self.lstm_cell = nn.LSTMCell(self.input_dim, self.hidden_dim)
 
         # Define the output layer
-        self.linear = nn.Linear(self.hidden_dim, self.output_dim)
+        self.output_layer = nn.Sequential(
+            nn.Linear(self.output_dim, self.output_dim),
+            nn.Softmax()
+        )
+
 
     def forward(self, x):
         # Construct the initial hidden state and cell state
-        initial_hidden = torch.zeros(self.num_layers, x.size(0), self.hidden_dim).requires_grad_()
-        initial_cell = torch.zeros(self.num_layers, x.size(0), self.hidden_dim).requires_grad_()
+        
+        hits = []# size of 20, records if the ith timestep is a hit (1) or not a hit (0), AKA feedback (everything the user likes)
+        out = []
+        for i in range(self.num_layers):
+            # Get the hidden state and cell state
+            hidden_state, cell_state = self.lstm_cell(x, (hidden_state, cell_state))
+            # record hits
 
-        # Forward pass through the LSTM layer
-        out, (hn, cn) = self.lstm(x, (initial_hidden, initial_cell))
-
-        # Capture the output of the last time step
-        out = self.linear(out[:, -1, :])
-
-        return out
+        # for ekin, give a_hat at each time step
+        return out, hits
     
 
 def parse_args() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description='Supervised Learning Benchmark')
     parser.add_argument('--lr', type=float, default=0.005, help='Learning rate for the model')
-    parser.add_argument('--input_dim', type=int, default=1, help='Input dimension of the model')
+    parser.add_argument('--input_dim', type=int, default=100, help='Input dimension of the model')
     parser.add_argument('--hidden_dim', type=int, default=100, help='Hidden dimension of the model')
-    parser.add_argument('--rnn_size', type=int, default=100, help='RNN size of the model')
-    parser.add_argument('--num_layers', type=int, default=1, help='Number of layers in the model')
+    parser.add_argument('--num_layers', type=int, default=20, help='Number of layers in the model')
     parser.add_argument('--num_epochs', type=int, default=100, help='Number of epochs to train the model')
     parser.add_argument('--batch_size', type=int, default=20, help='Batch size for training the model')
     parser.add_argument('--data_file', type=str, default='ml-100k/u.data', help='Path to the data file')
@@ -141,11 +148,8 @@ def main():
     # Get the items that each user has interacted with, key: user_id, value: list of item ids
     user_interests = get_user_interests(data_df, n_train_users)
     
-
-
     # Create Dataset and DataLoader objects for training and testing
     train_dataset = SLDataset(user_interests, args.memory_length)
-
 
     # Set up hyperparameters
     lr = args.lr
