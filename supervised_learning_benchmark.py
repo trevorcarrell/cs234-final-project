@@ -296,7 +296,7 @@ def main():
     # Parse the command line arguments
     args = parse_args()
 
-    model_file = args.model_file
+    model_file = f'{args.model_file}_n{args.num_recs}'
 
     # Load the user data
     data_df = load_data(args.data_file)
