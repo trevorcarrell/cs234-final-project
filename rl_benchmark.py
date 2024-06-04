@@ -7,26 +7,29 @@ from sklearn.model_selection import train_test_split
 from collections import defaultdict
 import argparse
 from torch.utils.data import Dataset, DataLoader
+from model import RecModel
 
+# %%
 class PolicyGradient(object):
     def __init__(self, data, config, seed, logger=None):
         """
         Initialize Policy Gradient Class
 
         Args:
-                env: an OpenAI Gym environment
+                data: pandas df of user
                 config: class with hyperparameters
                 logger: logger instance from the logging module
         """
+        self.config = config
+        self.seed = seed
+        self.data = data
 
         self.init_policy()
         pass
     
-    # %%
     def init_policy(self):
         # TODO: Instantiate model here
-        pass
-
+        self.model = RecModel(input_dim, hidden_dim, output_dim, num_timesteps, num_recommendations)
 
     def update_policy(self, episode):
         # Every data instance is an input + label pair
@@ -58,7 +61,7 @@ class PolicyGradient(object):
             
             discounted_rewards = torch.tensor(discounted_rewards)
             # outputs are (probability dist over each timestep)
-            
+
             # Compute the loss and its gradients
             # loss is 
             
