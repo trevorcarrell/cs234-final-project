@@ -231,8 +231,22 @@ def test_model(model, test_loader, criterion):
                 prev_hidden_state = hidden_states[-1]
                 prev_cell_state = cell_states[-1]
 
+                gamma = 0.9
+                values = torch.where(feedbacks > 0, 1.0, -0.2)
+                probs = masked_probs[torch.arange(len(a_hats)), a_hats]
+                log_probs = torch.log(probs + 1e-8)
+                num_timesteps = len(a_hats)
                 user_feedbacks.append(feedbacks)
-                loss = criterion(masked_probs, sub_episode)
+                T = len(values)
+                returns = torch.zeros(T)
+                for t in reversed(range(T)):
+                    cur_return = values[t]
+                    if t < T-1: 
+                        cur_return += gamma * returns[t+1]
+                    returns[t] = cur_return
+                gammas = torch.pow(gamma, torch.arange(num_timesteps))
+                loss = torch.sum(gammas * returns * -log_probs)
+                # loss = criterion(masked_probs, sub_episode)
                 test_loss += loss.item()
             
             all_feedbacks[user[e].item()] = torch.cat(user_feedbacks, dim=0)
@@ -299,27 +313,21 @@ def train_model(model, criterion, optimizer, train_loader, num_epochs, model_fil
                     log_probs_sum += torch.sum(log_probs)
                     # Compute discounted rewards
                     gamma = 0.90  # discount factor
-                    # for reward in reversed(values):
-                    #     cumulative_reward = reward + gamma * cumulative_reward
-                    #     discounted_rewards.insert(0, cumulative_reward)
-                   
-                    # print(returns)
-           
-                    # T = len(values)
-                    # returns = torch.zeros(T) # TODO: make this more efficient
-                    # for t in reversed(range(T)):
-                    #     cur_return = values[t]
-                    #     if t < T-1: 
-                    #         cur_return += gamma * returns[t+1]
-                    #     returns[t] = cur_return
-                    # gammas = torch.pow(gamma, torch.arange(num_timesteps))
-                    # # loss = torch.sum(gammas * returns * -log_probs)
+                    T = len(values)
+                    returns = torch.zeros(T)
+                    for t in reversed(range(T)):
+                        cur_return = values[t]
+                        if t < T-1: 
+                            cur_return += gamma * returns[t+1]
+                        returns[t] = cur_return
+                    gammas = torch.pow(gamma, torch.arange(num_timesteps))
+                    loss = torch.sum(gammas * returns * -log_probs)
                     # policy_loss = []
                     # for log_prob, R in zip(log_probs, returns): 
                     #     policy_loss.append(-log_prob * R)
                     # loss = torch.stack(policy_loss).sum()
                     # Calculate the loss and update the model parameters
-                    loss = criterion(masked_probs, sub_episode)
+                    # loss = criterion(masked_probs, sub_episode)
                     loss.backward()
                     
                     optimizer.step()

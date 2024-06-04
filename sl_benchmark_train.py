@@ -180,7 +180,7 @@ def parse_args() -> argparse.ArgumentParser:
     parser.add_argument('--num_epochs', type=int, default=30, help='Number of epochs to train the model')
     parser.add_argument('--batch_size', type=int, default=16, help='Batch size for training the model')
     parser.add_argument('--data_file', type=str, default='ml-100k/u.data', help='Path to the data file')
-    parser.add_argument('--model_file', type=str, default='rl_lstm_model.pth', help='Path to save the model')
+    parser.add_argument('--model_file', type=str, default='sl_lstm_model.pth', help='Path to save the model')
     parser.add_argument('--load_model', type=str, default=None, help='Path to load a pre-trained model')
 
     return parser.parse_args()
