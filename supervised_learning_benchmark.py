@@ -119,17 +119,21 @@ class LSTMModel(nn.Module):
             nn.Softmax(dim=0)
         )
 
-    def forward(self, x):
+    def forward(self, x, prev_a_hat=None, prev_feedback=None):
         # Construct the initial hidden state and cell state
         hidden_state = torch.zeros(self.hidden_dim)
         cell_state = torch.zeros(self.hidden_dim)
+
+        # Reset the mask if this is the first sub-episode
+        if prev_a_hat is None:
+            self.mask = torch.ones(self.output_dim)
 
         # Initialize the output tensors
         a_hats = torch.empty((self.num_timesteps), dtype=torch.long)  # Model predictions at each timestep
         feedbacks = torch.empty((self.num_timesteps), dtype=torch.long)  # Feedback at each timestep
         masked_probs = torch.empty((self.num_timesteps, self.output_dim))  # Masked probabilities at each timestep
-        a_hat = torch.tensor(0) 
-        feedback = 0
+        a_hat = torch.tensor(0) if prev_a_hat is None else prev_a_hat
+        feedback = 0 if prev_feedback is None else prev_feedback
         for i in range(self.num_timesteps): 
             a_hat = torch.tensor(a_hat).long()
             embedding_input = self.embed(a_hat) * feedback if i > 0 else torch.zeros_like(self.embed(a_hat))
@@ -168,22 +172,23 @@ def parse_args() -> argparse.ArgumentParser:
     parser.add_argument('--hidden_dim', type=int, default=100, help='Hidden dimension of the model')
     parser.add_argument('--num_timesteps', type=int, default=20, help='Number of layers in the model')
     parser.add_argument('--num_recs', type=int, default=10, help='Number of recommendations to make')
-    parser.add_argument('--num_epochs', type=int, default=100, help='Number of epochs to train the model')
+    parser.add_argument('--num_epochs', type=int, default=30, help='Number of epochs to train the model')
     parser.add_argument('--batch_size', type=int, default=16, help='Batch size for training the model')
     parser.add_argument('--data_file', type=str, default='ml-100k/u.data', help='Path to the data file')
     parser.add_argument('--model_file', type=str, default='sl_lstm_model.pth', help='Path to save the model')
+    parser.add_argument('--load_model', type=str, default=None, help='Path to load a pre-trained model')
 
     return parser.parse_args()
 
 
-def calculate_hit_at_n(feedbacks, num_users):
+def calculate_hit_at_n(feedbacks):
+    num_users = len(feedbacks)
+
     # Calculate the hit@N, where N is the number of recommendations
     hit_at_n = 0.0
-    for user_feedback in feedbacks:
-        # Convert all -1 feedbacks to 0
-        user_feedback[user_feedback == -1] = 0
-        hit_at_n += (1 / len(user_feedback)) * torch.sum(user_feedback, dim=0)
-    
+    for user_id, user_feedbacks in feedbacks.items():
+        hit_at_n += (1 / len(user_feedbacks)) * (torch.sum(user_feedbacks == 1).item() > 0)
+
     return hit_at_n / num_users
 
 
@@ -191,24 +196,37 @@ def test_model(model, test_loader, criterion):
     # Evalaute the trained model on the test set
     model.eval()
     test_loss = 0.0
-    all_feedbacks = []
+    all_feedbacks = {}
     for i, data in enumerate(test_loader, 0):
-        user_feedbacks = []
         user, episodes, episode_len = data
-        for e, episode in enumerate(episodes):            # Truncate the episode to the correct length
-            episode = episode[:episode_len[e]]
-
-            # Make a forward pass and calculate the loss
-            a_hats, feedbacks, masked_probs = model(episode)
-            user_feedbacks.append(feedbacks)
-            loss = criterion(masked_probs, episode[0])
-            test_loss += loss.item()
         
-        user_feedbacks = torch.cat(user_feedbacks, dim=0)
-        all_feedbacks.append(user_feedbacks)
+        for e, episode in enumerate(episodes):
+            user_feedbacks = []
+
+            # Truncate the episode to the correct length
+            episode = episode[:episode_len[e]]
+            prev_a_hat = None
+            prev_feedback = None
+            for s, sub_episode in enumerate(episode):
+
+                # Make a forward pass and calculate the loss
+                if s == 0:  # First sub-episode
+                    a_hats, feedbacks, masked_probs = model(sub_episode)
+                else:  # Subsequent sub-episodes
+                    a_hats, feedbacks, masked_probs = model(sub_episode, prev_a_hat, prev_feedback)
+
+                # Store the previous a_hat and feedback for next sub-episode
+                prev_a_hat = a_hats[-1]
+                prev_feedback = feedbacks[-1]
+
+                user_feedbacks.append(feedbacks)
+                loss = criterion(masked_probs, sub_episode)
+                test_loss += loss.item()
+            
+            all_feedbacks[user[e].item()] = torch.cat(user_feedbacks, dim=0)
 
     # Calculate the hit@N, where N is the number of recommendations
-    hit_at_n = calculate_hit_at_n(all_feedbacks, len(test_loader))
+    hit_at_n = calculate_hit_at_n(all_feedbacks)
     print(f'Test Loss: {test_loss}')
     print(f'Hit@{model.num_recommendations}: {hit_at_n}')
 
@@ -235,6 +253,16 @@ def train_model(model, criterion, optimizer, train_loader, num_epochs, model_fil
                     a_hats, feedbacks, masked_probs = model(sub_episode)
                     user_feedbacks.append(feedbacks)
 
+                    # Make a forward pass and calculate the loss
+                    if s == 0:  # First sub-episode
+                        a_hats, feedbacks, masked_probs = model(sub_episode)
+                    else:  # Subsequent sub-episodes
+                        a_hats, feedbacks, masked_probs = model(sub_episode, prev_a_hat, prev_feedback)
+
+                    # Store the previous a_hat and feedback for next sub-episode
+                    prev_a_hat = a_hats[-1]
+                    prev_feedback = feedbacks[-1]
+
                     # Calculate the loss and update the model parameters
                     loss = criterion(masked_probs, sub_episode)
                     loss.backward()
@@ -259,6 +287,9 @@ def train_model(model, criterion, optimizer, train_loader, num_epochs, model_fil
 
 
 def main():
+    # Set the random seed for reproducibility
+    torch.manual_seed(429)
+
     # Parse the command line arguments
     args = parse_args()
 
@@ -298,7 +329,10 @@ def main():
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
     # Train the model
-    train_model(model, criterion, optimizer, train_loader, num_epochs, model_file)
+    if args.load_model:
+        model.load_state_dict(torch.load(args.load_model))
+    else:
+        train_model(model, criterion, optimizer, train_loader, num_epochs, model_file)
 
     # Test the model
     test_model(model, test_loader, criterion)
