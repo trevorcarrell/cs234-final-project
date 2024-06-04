@@ -49,7 +49,7 @@ def get_train_test_data(data_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFra
     returning the number of unique users in each set.
     """
     unique_users = data_df.user.unique()
-    train_users, test_users = train_test_split(unique_users, test_size=0.1)
+    train_users, test_users = train_test_split(unique_users, test_size=0.1, random_state=429)
     train_data = data_df[data_df.user.isin(train_users)]
     test_data = data_df[data_df.user.isin(test_users)]
 
@@ -187,7 +187,7 @@ def calculate_hit_at_n(feedbacks):
     # Calculate the hit@N, where N is the number of recommendations
     hit_at_n = 0.0
     for user_id, user_feedbacks in feedbacks.items():
-        hit_at_n += (1 / len(user_feedbacks)) * (torch.sum(user_feedbacks == 1).item() > 0)
+        hit_at_n += (1 / len(user_feedbacks)) * torch.sum(user_feedbacks == 1)
 
     return hit_at_n / num_users
 
@@ -207,6 +207,7 @@ def test_model(model, test_loader, criterion):
             episode = episode[:episode_len[e]]
             prev_a_hat = None
             prev_feedback = None
+
             for s, sub_episode in enumerate(episode):
 
                 # Make a forward pass and calculate the loss
@@ -236,22 +237,24 @@ def test_model(model, test_loader, criterion):
 def train_model(model, criterion, optimizer, train_loader, num_epochs, model_file):
     # Train the model for num_epochs
     model.train()
-    all_feedbacks = []
+    all_feedbacks = {}
     for epoch in range(num_epochs):
         epoch_loss = 0.0
         for i, data in enumerate(train_loader, 0):
-            user_feedbacks = []
             user, episodes, episode_len = data
+
             for e, episode in enumerate(episodes):
+                user_feedbacks = []
+
                 # Truncate the episode to the correct length
                 episode = episode[:episode_len[e]]
+                prev_a_hat = None
+                prev_feedback = None
 
                 for s, sub_episode in enumerate(episode):
 
-                    # Zero the gradients and make a forward pass
+                    # Zero the gradients
                     optimizer.zero_grad()
-                    a_hats, feedbacks, masked_probs = model(sub_episode)
-                    user_feedbacks.append(feedbacks)
 
                     # Make a forward pass and calculate the loss
                     if s == 0:  # First sub-episode
@@ -267,17 +270,17 @@ def train_model(model, criterion, optimizer, train_loader, num_epochs, model_fil
                     loss = criterion(masked_probs, sub_episode)
                     loss.backward()
                     optimizer.step()
+                    user_feedbacks.append(feedbacks)
 
                     # Update the epoch loss
                     epoch_loss += loss.item()
 
-            user_feedbacks = torch.cat(user_feedbacks, dim=0)
-            all_feedbacks.append(user_feedbacks)
+                all_feedbacks[user[e].item()] = torch.cat(user_feedbacks, dim=0)
         
         print(f'Epoch {epoch + 1}, Loss: {epoch_loss }')
     
     # Calculate the hit@N, where N is the number of recommendations
-    hit_at_n = calculate_hit_at_n(all_feedbacks, len(train_loader))
+    hit_at_n = calculate_hit_at_n(all_feedbacks)
     print(f'Hit@{model.num_recommendations}: {hit_at_n}')
 
     # Save the model
