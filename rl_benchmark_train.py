@@ -1,3 +1,4 @@
+# %%
 import torch
 import torch.nn as nn
 import pandas as pd
@@ -202,11 +203,15 @@ def test_model(model, test_loader, criterion):
     model.eval()
     test_loss = 0.0
     all_feedbacks = {}
+    all_ahats = {}
+    all_i_u = {}
     for i, data in enumerate(test_loader, 0):
         user, episodes, episode_len = data
         
         for e, episode in enumerate(episodes):
+            user_id = user[e].item()
             user_feedbacks = []
+            user_ahats = []
 
             # Truncate the episode to the correct length
             episode = episode[:episode_len[e]]
@@ -218,7 +223,7 @@ def test_model(model, test_loader, criterion):
             prev_cell_state = None
 
             for s, sub_episode in enumerate(episode):
-
+                
                 # Make a forward pass and calculate the loss
                 if s == 0:  # First sub-episode
                     a_hats, feedbacks, masked_probs, (hidden_states, cell_states) = model(I_u)
@@ -237,6 +242,9 @@ def test_model(model, test_loader, criterion):
                 log_probs = torch.log(probs + 1e-8)
                 num_timesteps = len(a_hats)
                 user_feedbacks.append(feedbacks)
+                user_ahats.append(a_hats)
+
+
                 T = len(values)
                 returns = torch.zeros(T)
                 for t in reversed(range(T)):
@@ -250,14 +258,15 @@ def test_model(model, test_loader, criterion):
                 test_loss += loss.item()
             
             all_feedbacks[user[e].item()] = torch.cat(user_feedbacks, dim=0)
+            all_ahats[user_id] = torch.stack(user_ahats)
+            all_i_u[user_id] = I_u
 
     # Calculate the hit@N, where N is the number of recommendations
     hit_at_n = calculate_hit_at_n(all_feedbacks)
     print(f'Test Loss: {test_loss}')
     print(f'Hit@{model.num_recommendations}: {hit_at_n}')
 
-    return hit_at_n, test_loss
-
+    return hit_at_n, test_loss, all_feedbacks, all_ahats, all_i_u
 
 def train_model(model, criterion, optimizer, train_loader, num_epochs, model_file):
     # Train the model for num_epochs
@@ -405,10 +414,31 @@ def main():
         train_model(model, criterion, optimizer, train_loader, num_epochs, model_file)
 
     # Test the model
-    test_model(model, test_loader, criterion)
+    _, _, all_feedbacks, all_ahats, all_i_u = test_model(model, test_loader, criterion)
 
+    # min timesteps 
+    saved_user = 0
+    best_feedback = 0
+    len_feedback = 0
+    for user_id, user_feedbacks in all_feedbacks.items(): # for each user
+        
+        # hit_at_n += (torch.sum(user_feedbacks == 1) / len(user_feedbacks)) 
+        sum_feedback = torch.sum(user_feedbacks).item()
+        if sum_feedback > best_feedback: 
+            best_feedback = sum_feedback
+            saved_user = user_id
+            len_feedback = len(user_feedbacks)
+
+    # torch.save("feedback.all_feedbacks[saved_user])
+    print(saved_user, sum_feedback, len_feedback)
+    print(all_feedbacks[saved_user].shape, all_ahats[saved_user].shape, all_i_u[saved_user].shape)
+    # print(all_ahats)
+    print(all_feedbacks[saved_user])
+
+    print(all_ahats[saved_user])
            
 if __name__ == '__main__':
     main()
 
     
+# %%

@@ -238,12 +238,12 @@ def test_model(model, test_loader, criterion):
                 # Get values and probabilities for a_hat at each timestep
                 values = torch.where(feedbacks > 0, 1.0, -0.2)
                 probs = masked_probs[torch.arange(len(a_hats)), a_hats]
-                old_probs = old_masked_probs.detach()[torch.arange(len(a_hats)), a_hats] if old_masked_probs is not None else probs
                 if user_id not in old_masked_probs: 
                     old_probs = probs
                 else: 
                     old_probs = old_masked_probs[user_id][s][torch.arange(len(a_hats)), a_hats]
-                
+                user_mask_probs.append(masked_probs)
+
                 # Compute discounted rewards
                 gamma = 0.90  # discount factor
                 T = len(values)
@@ -354,8 +354,7 @@ def train_model(model, criterion, optimizer, train_loader, num_epochs, model_fil
 
                     gammas = torch.pow(gamma, torch.arange(num_timesteps))
                     z = probs / (old_probs + 1e-8)
-                    if epoch > 0: 
-                        print(z)
+        
                     # A^(k)_t advantage estimator
                     advantages = gammas * returns 
                     eps_clip = 0.2
